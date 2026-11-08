@@ -1,0 +1,18 @@
+package com.nightwing.engine
+import java.util.UUID
+class AdaptiveTrainingEngine(private val library:List<ExerciseDefinition> = BodyweightLibrary.all) {
+ fun recommend(i:EngineInput):TrainingRecommendation {
+  val r=i.recovery; val w=WorkloadModel.summarise(i); val pain=maxOf(r?.pain ?: 0,i.performances.filter { i.now-it.timestamp<=604800000L }.maxOfOrNull { it.pain } ?: 0)
+  val ev=w.evidence.toMutableList(); r?.let { ev+=Evidence("Sleep","${it.sleepHours}h","Self-reported"); ev+=Evidence("Soreness","${it.soreness}/10","Self-reported"); ev+=Evidence("Fatigue","${it.fatigue}/10","Self-reported"); ev+=Evidence("Pain","${it.pain}/10","Safety signal") }
+  if(pain>=4)return make(i,DecisionType.REVIEW_PAIN,"Pause and review pain","Pain >= 4/10. Do not train through it; avoid painful movement and seek qualified advice for persistent or concerning pain.",0.0,emptyList(),ev)
+  if(pain>0)return make(i,DecisionType.REDUCE,"Modify around discomfort","Pain was reported. Avoid loading painful movements; only consider comfortable, pain-free alternatives.",0.0,emptyList(),ev)
+  if(r!=null && (r.fatigue>=8 || r.soreness>=8 || r.sleepHours<4.5))return make(i,DecisionType.REST,"Recovery takes priority","A recovery signal is markedly strained. Recommend rest or gentle comfortable mobility.",0.0,emptyList(),ev)
+  val hard=w.sportLoadLast24h>=450 || i.activities.any { it.kind in setOf(SessionKind.FOOTBALL,SessionKind.TENNIS) && i.now-it.timestamp in 0..86400000L && it.durationMinutes>=60 && it.intensity>=7 }
+  val strained=r!=null && (r.fatigue>=6 || r.soreness>=6 || r.sleepHours<6.0)
+  if(hard || strained){ val m=library.firstOrNull { it.id=="hip_mobility_flow" }; val p=if(m==null) emptyList() else listOf(PlannedExercise(m,1,"5–8 gentle reps",30,"Optional pain-free mobility")); return make(i,DecisionType.RECOVER,"Recovery-focused day","Recent sports workload or recovery signals suggest reducing training stress.",0.4,p,ev) }
+  val patterns=listOf(MovementPattern.PUSH,MovementPattern.SQUAT,MovementPattern.HINGE,MovementPattern.CORE,MovementPattern.PULL).filterNot { it in i.constraints.unavailablePatterns }
+  val plan=patterns.mapNotNull { p -> val candidates=library.filter { it.pattern==p && i.constraints.availableEquipment.containsAll(it.equipment) }; val base=candidates.minByOrNull { it.level } ?: return@mapNotNull null; val hist=i.performances.filter { x -> candidates.any { it.id==x.exerciseId } }; val last=hist.maxByOrNull { it.timestamp }; val current=last?.let { x -> candidates.first { it.id==x.exerciseId } } ?: base; val h=i.performances.filter { it.exerciseId==current.id }; val progress=ProgressionPolicy.shouldProgress(current,i.performances); val regress=ProgressionPolicy.shouldRegress(h); val chosen=when { regress && current.regressionId!=null -> library.firstOrNull { it.id==current.regressionId } ?: current; progress && current.progressionId!=null -> library.firstOrNull { it.id==current.progressionId } ?: current; else -> current }; PlannedExercise(chosen,chosen.defaultSets,"${chosen.minReps}–${chosen.maxReps}",chosen.restSeconds,if(progress) "Two successful exposures met progression criteria" else "Maintain until performance supports change") }
+  return make(i,if(plan.any { it.rationale.startsWith("Two successful") }) DecisionType.PROGRESS else DecisionType.TRAIN,"Bodyweight session proposed","No high-priority safety or recovery flags detected. Log reps, effort and form. Proposed changes require your approval.",1.0,plan,ev)
+ }
+ private fun make(i:EngineInput,d:DecisionType,t:String,x:String,m:Double,p:List<PlannedExercise>,e:List<Evidence>)=TrainingRecommendation(UUID.randomUUID().toString(),d,t,x,m,p,e,ApprovalStatus.PROPOSED,i.now)
+}
